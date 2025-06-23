@@ -126,6 +126,14 @@ type Model struct {
 	// Spinner fields
 	showSpinner  bool // Whether to show the spinner
 	spinnerFrame int  // Current spinner frame
+
+	// Tail mode field
+	tailMode             bool // Whether tail mode is enabled (auto-jump to bottom on new lines)
+	needsInitialTailJump bool // Whether we need to jump to end after window size is known
+
+	// Help system
+	showHelp     bool // Whether to show the help screen
+	helpViewport int  // Scroll position in help view
 }
 
 // Init initializes the model
@@ -141,6 +149,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.height = msg.Height
 		m.width = msg.Width
+
+		// If we need to perform initial tail jump, do it now that we have window size
+		if m.needsInitialTailJump {
+			visibleLines := m.getVisibleLines()
+			if len(visibleLines) > 0 {
+				m.cursor = len(visibleLines) - 1
+				// Adjust viewport to show the last line at the bottom, just above status bar
+				if len(visibleLines) > m.height-1 {
+					m.viewport = len(visibleLines) - (m.height - 1)
+				} else {
+					m.viewport = 0
+				}
+				m.lineScrollOffset = 0
+			}
+			m.needsInitialTailJump = false
+		}
+
 		return m, nil
 
 	case tea.KeyMsg:
@@ -485,8 +510,52 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.viewCursorPos = len(m.viewInput)
 			}
 
+		case "t":
+			if !m.showPretty && !m.filterMode && !m.filterManageMode && !m.viewMode {
+				m.tailMode = !m.tailMode
+
+				// If tail mode is now enabled, load the entire file and jump to the end
+				if m.tailMode {
+					if !m.isFileFullyLoaded {
+						// Start spinner and trigger loading to end
+						m.showSpinner = true
+						m.spinnerFrame = 0
+						return m, tea.Batch(
+							spinnerTickCmd(),
+							loadToEndCmd(m.filename, m.file, len(m.lines)),
+						)
+					} else {
+						// File already fully loaded, jump immediately
+						visibleLines := m.getVisibleLines()
+						if len(visibleLines) > 0 {
+							m.cursor = len(visibleLines) - 1
+							// Adjust viewport to show the last line at the bottom
+							if m.cursor >= m.height-1 { // Account for status bar only
+								m.viewport = m.cursor - m.height + 2
+								if m.viewport < 0 {
+									m.viewport = 0
+								}
+							} else {
+								m.viewport = 0
+							}
+							m.lineScrollOffset = 0
+						}
+					}
+				}
+			}
+
+		case "h":
+			if !m.showPretty && !m.filterMode && !m.filterManageMode && !m.viewMode {
+				m.showHelp = !m.showHelp
+			}
+
 		case "up", "k":
-			if m.showPretty {
+			if m.showHelp {
+				// Scroll up in help view
+				if m.helpViewport > 0 {
+					m.helpViewport--
+				}
+			} else if m.showPretty {
 				// Scroll up in pretty print view
 				if m.prettyViewport > 0 {
 					m.prettyViewport--
@@ -504,7 +573,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "down", "j":
-			if m.showPretty {
+			if m.showHelp {
+				// Scroll down in help view with bounds checking
+				maxScroll := m.calculateHelpMaxScroll()
+				if m.helpViewport < maxScroll {
+					m.helpViewport++
+				}
+			} else if m.showPretty {
 				// Scroll down in pretty print view with bounds checking
 				maxScroll := m.calculatePrettyMaxScroll()
 				if m.prettyViewport < maxScroll {
@@ -590,7 +665,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "pgup", "page_up":
-			if m.showPretty {
+			if m.showHelp {
+				// Page up in help view
+				pageSize := m.height - 1 // Account for status bar
+				if pageSize < 1 {
+					pageSize = 1
+				}
+				m.helpViewport -= pageSize
+				if m.helpViewport < 0 {
+					m.helpViewport = 0
+				}
+			} else if m.showPretty {
 				// Page up in pretty print view
 				pageSize := m.height - 1 // Account for status bar
 				if pageSize < 1 {
@@ -624,7 +709,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "pgdn", "page_down", "pgdown":
-			if m.showPretty {
+			if m.showHelp {
+				// Page down in help view
+				pageSize := m.height - 1 // Account for status bar
+				if pageSize < 1 {
+					pageSize = 1
+				}
+				maxScroll := m.calculateHelpMaxScroll()
+				m.helpViewport += pageSize
+				if m.helpViewport > maxScroll {
+					m.helpViewport = maxScroll
+				}
+			} else if m.showPretty {
 				// Page down in pretty print view
 				pageSize := m.height - 1 // Account for status bar
 				if pageSize < 1 {
@@ -672,7 +768,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "enter", " ":
-			if m.showPretty {
+			if m.showHelp {
+				// Do nothing when help screen is open
+			} else if m.showPretty {
 				// Close pretty print view
 				m.showPretty = false
 				m.selectedLine = nil
@@ -688,7 +786,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "esc":
-			if m.showPretty {
+			if m.showHelp {
+				// Close help screen
+				m.showHelp = false
+			} else if m.showPretty {
 				// Close pretty print view
 				m.showPretty = false
 				m.selectedLine = nil
@@ -754,6 +855,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Apply filters to new lines if filters exist
 			if len(m.filters) > 0 {
 				m.applyFilters()
+			}
+
+			// If tail mode is enabled, jump to the bottom automatically
+			// This must happen AFTER filters are applied
+			if m.tailMode {
+				visibleLines := m.getVisibleLines()
+				if len(visibleLines) > 0 {
+					m.cursor = len(visibleLines) - 1
+					// Adjust viewport to show the last line at the bottom
+					if m.cursor >= m.height-1 { // Account for status bar only
+						m.viewport = m.cursor - m.height + 2
+						if m.viewport < 0 {
+							m.viewport = 0
+						}
+					} else {
+						m.viewport = 0
+					}
+					m.lineScrollOffset = 0
+				}
 			}
 
 			// Update file size (we need to get current file size)
@@ -854,6 +974,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the TUI
 func (m Model) View() string {
+	if m.showHelp {
+		return m.renderHelpView()
+	}
+
 	if m.showPretty && m.selectedLine != nil {
 		return m.renderPrettyView()
 	}
@@ -1051,11 +1175,14 @@ func (m Model) View() string {
 			}
 		}
 
-		controls := "F/f=Filters"
-		if len(m.filters) > 0 && enabledCount > 1 {
-			controls = fmt.Sprintf("F/f=Filters(%d)", enabledCount)
+		controls := "h=Help"
+
+		// Add tail mode status
+		if m.tailMode {
+			controls += " | T=on"
+		} else {
+			controls += " | T=off"
 		}
-		controls += " | V=View"
 
 		// Determine total count for status
 		totalCount := len(displayLines)
@@ -1078,7 +1205,7 @@ func (m Model) View() string {
 
 		// Create main status text without spinner
 		statusText := fmt.Sprintf(
-			"%s | Line %s/%s | %s | SPACE=Pretty | Q=Quit",
+			"%s | Line %s/%s | %s",
 			m.filename, humanize.Comma(int64(currentLineNumber)), totalIndicator, controls,
 		)
 
@@ -1198,6 +1325,93 @@ func (m Model) renderPrettyView() string {
 		"Pretty Print - Line %s%s | ↑/↓/PgUp/PgDn to scroll | ENTER/SPACE/ESC to return | q to quit",
 		humanize.Comma(int64(m.selectedLine.LineNumber)), scrollInfo,
 	)
+	status := statusStyle.Width(m.width - 1).Render(statusText)
+	s.WriteString(status)
+
+	return s.String()
+}
+
+// renderHelpView renders the help screen
+func (m Model) renderHelpView() string {
+	var s strings.Builder
+
+	// Calculate available space
+	statusLines := 1
+	availableLines := m.height - statusLines
+	if availableLines < 1 {
+		availableLines = 1
+	}
+
+	// Help content
+	helpLines := []string{
+		"SIFT - Interactive Log Viewer",
+		"",
+		"NAVIGATION:",
+		"  ↑/↓, k/j        Navigate up/down through log lines",
+		"  ←/→             Scroll selected line horizontally",
+		"  Ctrl+←/→        Fast horizontal scroll (5 characters)",
+		"  PgUp/PgDn       Page up/down through logs",
+		"  Home            Jump to first line",
+		"  End             Jump to last line (loads entire file if needed)",
+		"  Space/Enter     Open pretty-print view for selected line",
+		"",
+		"FILTERING:",
+		"  f               Add a new JQ filter",
+		"  F               Open Filter Management",
+		"    ↑/↓           Navigate between filters",
+		"    Space/Enter   Toggle filter on/off",
+		"    e             Edit filter expression",
+		"    d/x           Delete filter",
+		"    F/Esc         Exit management",
+		"",
+		"VIEW TRANSFORMATIONS:",
+		"  v/V             Enter View mode to transform display",
+		"                  (use JQ expressions to format output)",
+		"",
+		"TAIL MODE:",
+		"  t               Toggle Tail Mode (auto-jump to bottom on new lines)",
+		"                  Shows T=on/T=off in status bar",
+		"",
+		"OTHER:",
+		"  h               Show/hide this help screen",
+		"  q/Ctrl+C        Quit application",
+		"  Esc             Close help/pretty-print view or quit",
+		"",
+		"COMMAND LINE:",
+		"  -f <filter>     Apply JQ filter on startup",
+		"  -V <view>       Apply view transformation on startup",
+		"  -t              Start with Tail Mode enabled",
+		"",
+		"Press 'h' or 'Esc' to close this help screen",
+	}
+
+	// Apply viewport scrolling
+	startLine := m.helpViewport
+	endLine := startLine + availableLines
+	if endLine > len(helpLines) {
+		endLine = len(helpLines)
+	}
+
+	// Render visible help content
+	contentLines := 0
+	for i := startLine; i < endLine && contentLines < availableLines; i++ {
+		s.WriteString(helpLines[i])
+		s.WriteString("\n")
+		contentLines++
+	}
+
+	// Fill remaining space to push status bar to bottom
+	for contentLines < availableLines {
+		s.WriteString("\n")
+		contentLines++
+	}
+
+	// Status bar with scroll indicator
+	scrollInfo := ""
+	if len(helpLines) > availableLines {
+		scrollInfo = fmt.Sprintf(" (%d/%d)", m.helpViewport+1, len(helpLines)-availableLines+1)
+	}
+	statusText := fmt.Sprintf("%s | Help Screen%s | h/ESC=Close", m.filename, scrollInfo)
 	status := statusStyle.Width(m.width - 1).Render(statusText)
 	s.WriteString(status)
 
@@ -1383,6 +1597,68 @@ func (m Model) calculatePrettyMaxScroll() int {
 	}
 
 	maxScroll := len(allLines) - availableLines
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	return maxScroll
+}
+
+// calculateHelpMaxScroll calculates the maximum scroll position for help view
+func (m Model) calculateHelpMaxScroll() int {
+	if !m.showHelp {
+		return 0
+	}
+
+	statusLines := 1
+	availableLines := m.height - statusLines
+	if availableLines < 1 {
+		availableLines = 1
+	}
+
+	// Help content lines (same as in renderHelpView)
+	helpLines := []string{
+		"SIFT - Interactive Log Viewer",
+		"",
+		"NAVIGATION:",
+		"  ↑/↓, k/j        Navigate up/down through log lines",
+		"  ←/→             Scroll selected line horizontally",
+		"  Ctrl+←/→        Fast horizontal scroll (5 characters)",
+		"  PgUp/PgDn       Page up/down through logs",
+		"  Home            Jump to first line",
+		"  End             Jump to last line (loads entire file if needed)",
+		"  Space/Enter     Open pretty-print view for selected line",
+		"",
+		"FILTERING:",
+		"  f               Add a new JQ filter",
+		"  F               Open Filter Management",
+		"    ↑/↓           Navigate between filters",
+		"    Space/Enter   Toggle filter on/off",
+		"    e             Edit filter expression",
+		"    d/x           Delete filter",
+		"    F/Esc         Exit management",
+		"",
+		"VIEW TRANSFORMATIONS:",
+		"  v/V             Enter View mode to transform display",
+		"                  (use JQ expressions to format output)",
+		"",
+		"TAIL MODE:",
+		"  t               Toggle Tail Mode (auto-jump to bottom on new lines)",
+		"                  Shows T=on/T=off in status bar",
+		"",
+		"OTHER:",
+		"  h               Show/hide this help screen",
+		"  q/Ctrl+C        Quit application",
+		"  Esc             Close help/pretty-print view or quit",
+		"",
+		"COMMAND LINE:",
+		"  -f <filter>     Apply JQ filter on startup",
+		"  -V <view>       Apply view transformation on startup",
+		"  -t              Start with Tail Mode enabled",
+		"",
+		"Press 'h' or 'Esc' to close this help screen",
+	}
+
+	maxScroll := len(helpLines) - availableLines
 	if maxScroll < 0 {
 		maxScroll = 0
 	}
@@ -1818,9 +2094,11 @@ func main() {
 	var filters filterFlags
 	var viewExpression string
 	var showVersion bool
+	var tailMode bool
 	flag.Var(&filters, "f", "JQ filter expression (can be used multiple times)")
 	flag.StringVar(&viewExpression, "V", "", "JQ view transformation expression")
 	flag.BoolVar(&showVersion, "v", false, "Show version and exit")
+	flag.BoolVar(&tailMode, "t", false, "Start with Tail Mode enabled (auto-jump to bottom on new lines)")
 	flag.Parse()
 
 	// Handle version flag
@@ -1855,18 +2133,40 @@ func main() {
 	const initialChunkSize = 1000 // Load first 1000 lines
 	const sampleSize = 100        // Sample size for estimating total lines
 
-	// Load initial chunk of lines
-	lines, file, err := loadInitialChunk(filename, initialChunkSize)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading file: %v\n", err)
-		os.Exit(1)
+	var lines []LogLine
+	var file *os.File
+	var isFileFullyLoaded bool
+
+	if tailMode {
+		// Load entire file when tail mode is enabled
+		allLines, err := loadAllLines(filename)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading file: %v\n", err)
+			os.Exit(1)
+		}
+		lines = allLines
+		file = nil // No need to keep file handle when fully loaded
+		isFileFullyLoaded = true
+	} else {
+		// Load initial chunk of lines
+		var err error
+		lines, file, err = loadInitialChunk(filename, initialChunkSize)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading file: %v\n", err)
+			os.Exit(1)
+		}
+		isFileFullyLoaded = len(lines) < initialChunkSize
 	}
 
-	// Estimate total lines in the file
-	estimatedTotal, err := estimateTotalLines(filename, sampleSize)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error estimating file size: %v\n", err)
-		estimatedTotal = len(lines) // Fallback to current line count
+	// Estimate total lines in the file (only needed if not fully loaded)
+	estimatedTotal := len(lines)
+	if !isFileFullyLoaded {
+		var err error
+		estimatedTotal, err = estimateTotalLines(filename, sampleSize)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error estimating file size: %v\n", err)
+			estimatedTotal = len(lines) // Fallback to current line count
+		}
 	}
 
 	// Determine the last line number
@@ -1894,11 +2194,12 @@ func main() {
 		filterCursor:        0,
 		file:                file,
 		filePos:             0,
-		isFileFullyLoaded:   len(lines) < initialChunkSize, // If we got fewer lines than requested, file is fully loaded
+		isFileFullyLoaded:   isFileFullyLoaded,
 		loadingMoreLines:    false,
 		estimatedTotalLines: estimatedTotal,
 		showSpinner:         false,
 		spinnerFrame:        0,
+		tailMode:            tailMode, // Set tail mode from command line flag
 	}
 
 	// Add command-line filters
@@ -1923,6 +2224,12 @@ func main() {
 		}
 		m.viewFilter = query
 		m.viewExpression = viewExpression
+	}
+
+	// If tail mode is enabled, mark that we need to jump to end once window size is known
+	if tailMode {
+		m.tailMode = true
+		m.needsInitialTailJump = true
 	}
 
 	// Start the TUI
@@ -2039,6 +2346,44 @@ func loadToEndCmd(filename string, file *os.File, currentLineCount int) tea.Cmd 
 			isComplete: true,
 		}
 	}
+}
+
+// loadAllLines loads all lines from the file (used when tail mode is enabled)
+func loadAllLines(filename string) ([]LogLine, error) {
+	file, err := os.Open(filename)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	var lines []LogLine
+	scanner := bufio.NewScanner(file)
+	lineNumber := 1
+
+	for scanner.Scan() {
+		rawLine := scanner.Text()
+		logLine := LogLine{
+			LineNumber: lineNumber,
+			RawLine:    rawLine,
+			IsValid:    false,
+		}
+
+		// Try to parse as JSON
+		var jsonData map[string]interface{}
+		if err := json.Unmarshal([]byte(rawLine), &jsonData); err == nil {
+			logLine.JSONData = jsonData
+			logLine.IsValid = true
+		}
+
+		lines = append(lines, logLine)
+		lineNumber++
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+
+	return lines, nil
 }
 
 // applyViewTransform applies the view transformation filter to JSON data

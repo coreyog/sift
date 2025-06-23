@@ -44,6 +44,7 @@ This project is 99% written by AI. The rest was written by a human. Some things 
 | `PgUp/PgDn` | Page up/down through logs |
 | `Home` | Jump to first line |
 | `End` | Jump to last line (loads entire file if needed) |
+| `t` | Toggle Tail Mode (auto-jump to bottom on new lines) |
 | `Space/Enter` | Open pretty-print view for selected line |
 | `Esc` | Close pretty-print or quit application |
 | `q` | Quit application |
@@ -170,6 +171,18 @@ Monitor actively written log files:
 - **Position Preservation**: Maintains your current view position during updates
 - **Filter Application**: New lines are automatically filtered using active filters
 
+### Tail Mode
+
+Press `t` to toggle Tail Mode for active log monitoring:
+
+- **Auto-jump to Bottom**: When enabled, automatically jumps to the newest log entries when new lines are detected
+- **Full File Loading**: Activating Tail Mode loads the entire file to ensure you see the true end
+- **Status Indicator**: Status bar shows `T=on` when active, `T=off` when disabled
+- **Smart Behavior**: Only jumps to bottom for new lines that pass active filters
+- **Manual Toggle**: Press `t` again to disable and return to normal navigation
+
+**Use Case**: Perfect for monitoring live application logs, error tracking, or following deployment progress in real-time.
+
 ## File Format Support
 
 Sift is designed for JSON-per-line log formats where each line contains a valid JSON object:
@@ -193,6 +206,7 @@ The status bar shows:
 - **Filename**: Currently viewed log file
 - **Position**: Current line number and total lines
 - **Filter Count**: Number of active filters (when > 1)
+- **Tail Mode**: Shows `T=on` when Tail Mode is active, `T=off` when disabled
 - **Progress**: Estimated completion for large files
 - **Controls**: Available keyboard shortcuts
 - **Loading Indicator**: Spinner during background operations
