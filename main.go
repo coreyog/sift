@@ -1704,12 +1704,12 @@ func highlightJSON(jsonText string) (string, error) {
 		lexer = lexers.Fallback
 	}
 
-	style := styles.Get("github")
+	style := styles.Get("friendly")
 	if style == nil {
 		style = styles.Fallback
 	}
 
-	formatter := formatters.Get("terminal16")
+	formatter := formatters.Get("terminal256")
 	if formatter == nil {
 		formatter = formatters.Fallback
 	}
